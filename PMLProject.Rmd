@@ -1,0 +1,241 @@
+---
+title: "Practical Machine Learning Project"
+author: "Sahera Kadim"
+date: "24 July 2015"
+output: html_document
+---
+
+In this project, our goal is to use data from accelerometers
+on the belt, forearm, arm, and dumbell of 6 participants. They
+were asked to perform barbell lifts correctly and incorrectly in 5
+different ways (A:E). The data contains training data set with 19622 
+observations and 160 variables, and test set of 20 observations and 160
+variables.The goal is to predict the manner in which they did the 
+exercise. This is the "classe" variable in the training set.
+
+**1.Setting the environment**
+
+
+```{r, setEnv, eval=FALSE}
+
+library(wsrf);library(C50);library(rpart);library(caret); 
+library(pROC);library(adabag); library(klaR);library(lattice);
+library(ggplot2);library(pROC);library(parallel);library(doSNOW)
+ machineCores <- detectCores()
+ registerDoSNOW(machineCores)
+ setwd("~/R_work/ML")
+
+```
+
+**2.Read and clean data.**
+
+```{r RnC, eval=FALSE}
+ 
+ train.df<-read.csv("pml-training.csv",header=TRUE)
+ (tt <- table(train.df$classe))
+ ##Remove the column contain NA, 
+ del.col <- which(colSums(is.na(train.df))>10000)
+ train.df <- train.df[,-del.col]
+ (sum(is.na(train.df))) 
+ dim(train.df)
+ ##Remove empty column
+ train.df <- train.df[,(train.df[1,]!="")]
+ dim(train.df)
+ train.df<- train.df[!names(train.df) %in% c("X","user_name")] 
+ dim(train.df)
+
+```
+
+**3.To see if there is a linear combos for any of the numeric data.
+To make sure we don't have any near zero variables.
+To find correlations between all numeric variables.**
+
+```{r comb,  eval=FALSE}
+ 
+ comboInfo <- findLinearCombos(train.df[,c(1:2,5:57)])
+ nzv <-nearZeroVar(train.df)
+ train.df$new_window<-NULL
+ dCor<- cor(train.df[,c(1,2,4:56)])
+ findCorrelation(dCor, cutoff = .99)
+ names(train.df)[13]
+ train.df$accel_belt_y<-NULL
+ dim(train.df)
+ 
+```
+
+
+**4.The function createDataPartition can be used to create a 
+stratified random sample of the data into training and test sets**
+ 
+```{r stand, eval=FALSE}
+ inTrain <-createDataPartition(y=train.df$classe,p=.75,list=FALSE)
+ training <-train.df[inTrain,]
+ testing <- train.df[-inTrain,]
+```
+
+
+**5.Scalable Weighted Subspace Random Forests(wsrf) used to get 
+variables importance**
+
+wsrf is an R Package for Scalable Weighted Subspace Random Forests.The 
+algorithm can classify very high-dimensional data with random  forests 
+built using small subspaces. A novel variable weighting method is used 
+for variable subspace selection in place of the traditional random 
+variable sampling.This new approach is particularly useful in building 
+models from high-dimensional data.
+It is faster than random forest and has more useful properties than 
+random forest. I used it to know the variable importance.
+The first variable importance measures is computed from permuting OOB 
+data: For each tree, the prediction error on the out-of-bag portion of 
+the data is recorded. Then the same is done after permuting each 
+predictor variable. The difference between the two are then averaged 
+over all trees, and normalized by the standard deviation of the 
+differences.
+The second measure is the total decrease in node impurities from 
+splitting on the variable, averaged over all trees. The node impurity 
+is measured by the Information Gain Ratio index.
+
+```{r wsrf, eval=FALSE}
+model.wsrf <- wsrf(classe ~. , data= training, mtry=6)
+wsrf.preds <- predict(model.wsrf, newdata= training, type="class")     
+correlation(model.wsrf)
+oob.error.rate(model.wsrf)
+var.imp <- varCounts.wsrf(model.wsrf)
+ impvar <- sort(var.imp, decreasing=TRUE)
+ impvar; length(impvar) 
+ imp.df <- names(impvar)[1:35]
+ trim <- training[,imp.df]
+ classe <- training$classe
+ training <- data.frame (classe, trim)
+ dim(training)
+ names(training)[1]
+ 
+```
+ 
+ 
+ **6.Fitting Models**
+
+*-First trylinear discriminant analysis & using train control to 
+set  cross validation.*
+
+```{r lda ,eval=FALSE}
+ 
+cvCtrl <- trainControl(method = "repeatedcv",repeats = 3)
+model.lda <-train(classe~.,data=training,method="lda",
+                    trControl= cvCtrl)
+ pred.lda <- predict(model.lda, testing)
+ confusionMatrix(pred.lda,testing$classe)
+``` 
+ 
+*-Decision trees*
+
+C5.0 decision trees and rule-based models for pattern recognition.
+By default, C5.0 measures predictor importance by determining the 
+percentage of training set samples that fall into all the terminal 
+nodes after the split.
+
+```{r C5, eval=FALSE}
+ 
+ model.C5Rules <- C5.0(classe ~ ., data = training, rules=TRUE)
+ summary(model.C5Rules) ## show the rules
+ pred.C5 <- predict( model.C5Rules,testing,type = "class")
+table(pred.C5)
+table(pred.C5,testing$classe)
+C5imp(model.C5Rules, metric = "splits") 
+```
+
+*-Recursive Partitioning and Regression Trees(rpart)* with tuning to 
+set *cross validation.*
+
+```{r rpart, eval=FALSE}
+tuned.rpart <- train(classe ~ ., data = training,method = "rpart",
+                      tuneLength = 30,trControl = cvCtrl)
+ p.tuned.rpart = predict(tuned.rpart,testing)
+ confusionMatrix(p.tuned.rpart,testing$classe)
+```
+
+
+*-Tuning C5 to set cross validation* using the same train control used 
+with rpart with *grid.*
+
+```{r C5tun, eval=FALSE}
+grid <- expand.grid(.model="tree", .trials = c(1:100),.winnow = FALSE)
+tuned.C5 <- C5.0(classe ~ ., data = training,
+                 metric = "ROC",tuneGrid = grid,trControl = cvCtrl)
+p.tuned.C5 = predict(tuned.C5,testing)
+
+```
+
+ 
+*-Compare two tunned models.*
+ 
+```{r comp, eval = FALSE}
+
+p.tuned.rpart = predict(tuned.rpart,testing)
+p.tuned.C5 = predict(tuned.C5,testing)
+qplot(p.tuned.rpart, p.tuned.C5, color=classe, data=testing)
+equal.Preds = (p.tuned.rpart== p.tuned.C5)
+sum(equal.Preds)
+confusionMatrix(p.tuned.rpart,p.tuned.C5)
+qplot(num_window,cvtd_timestamp ,colour=equal.Preds,data=testing)
+
+```
+
+*-Boosting*
+
+With boosting we take a different approach to refitting models. 
+Consider a classification task in which we start with a basic learner 
+and apply it to the data of interest. Next the learner is
+refit, but with more weight given to misclassified observations. This 
+process is repeated until some stopping rule is reached. Boosting in 
+general is highly resistant to overfitting.
+
+```{r ada , eval=FALSE}
+model.ada <- boosting(classe ~., data =training, boos=TRUE, mfinal=10)
+ada.pred <- predict(object= model.ada,newdata =testing, type = "class")
+ada.pred$confusion
+importanceplot(model.ada)
+
+```
+
+**7.Test models accuracy(out of sample error)against the cross 
+validation set.**
+
+```{r acc, eval=FALSE}
+ 
+(model.lda.acc <-sum(predict(model.lda,testing)==                      
+                        testing$classe)/length(testing$classe))
+(tuned.rpart.acc <-sum(predict(tuned.rpart,testing)==                  
+                           testing$classe)/length(testing$classe))
+(tuned.C5.acc <-sum(predict(tuned.C5,testing)==
+                         testing$classe)/length(testing$classe))
+(model.C5Rules.acc <-sum(predict( model.C5Rules,testing)==             
+                             testing$classe)/length(testing$classe))
+```
+
+**8.Predict the 20 values from the test set**
+
+```{r test, eval=FALSE}
+ 
+ test.df<-read.csv("pml-testing.csv",header=TRUE)
+ 
+ (submit<-predict(model.lda,test.df))
+ 
+ (submit<-predict(tuned.rpart,test.df))
+
+ (submit<-predict(tuned.C5,test.df))
+
+ ( submit<-predict(model.C5Rules,test.df))
+  
+```
+
+**9.conclusion:**
+
+I tried to handle NA values through randomForest function 
+na.roughfix()in wsrf model,it worked fine with wsrf model, but cause me
+problems with others. I found library(wsrf),library(C50) are quite 
+better than randomForest. C5 classifires with rules or with tuning are 
+very good and they give the same  test result.They have less train and 
+test error,fast, and have alot of usefull properties.
+I spent a lot of time on ensambling and meta classifiers,but most of 
+them in their early phase.But,the future is for Ensambling learning,and meta classifiers in RWeka and mlr packages,which need efforts to develop it.
